@@ -1,15 +1,17 @@
 use anyhow::Result;
-use eframe::egui::{self, DragValue, Response};
-use egui::{Pos2, Rect, Vec2};
+use eframe::egui::{self, DragValue};
+use egui::{Pos2, Rect, Response, Vec2};
 use mashlife::{geometry::Coord, Handle, HashLife};
 use std::collections::HashSet;
-use std::time::{Instant, Duration};
+// use std::time::{Instant, Duration};
 type ZwoHasher = std::hash::BuildHasherDefault<zwohash::ZwoHasher>;
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 #[cfg_attr(feature = "persistence", derive(serde::Deserialize, serde::Serialize))]
 #[cfg_attr(feature = "persistence", serde(default))] // if we add new fields, give them default values when deserializing old state
 pub struct MashlifeGui {
+    /// View mode: 0 = Normal, 1 = Fit all live cells, 2 = Fit visible live cells
+    auto_camera_mode: u8,
     grid_view: GridView,
     life: HashLife,
     world: Handle,
@@ -33,7 +35,7 @@ impl Default for MashlifeGui {
         let (rle, width) = mashlife::io::parse_rle(include_str!("builtin_patterns/clock.rle")).unwrap();
         let (input, view_center) = load_rle(&rle, width, &mut life).unwrap();
 
-        let instance = Self {
+        Self {
             grid_view: GridView::new(),
             world: input,
             view_center,
@@ -42,9 +44,8 @@ impl Default for MashlifeGui {
             //step_timing: Duration::ZERO,
             time_div: 1,
             frame_count: 0,
-        };
-
-        instance
+            auto_camera_mode: 0, // default to Normal
+        }
     }
 }
 
@@ -108,6 +109,56 @@ impl eframe::App for MashlifeGui {
     /// Called each time the UI needs repainting, which may be many times per second.
     /// Put your widgets into a `SidePanel`, `TopPanel`, `CentralPanel`, `Window` or `Area`.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+            // Auto camera: dynamically center and zoom on pattern
+        match self.auto_camera_mode {
+            1 => { // Fit visible live cells
+                let viewport = self.grid_view.last_viewport_size.unwrap_or(Vec2::new(800.0, 600.0));
+                let view_rect = self.grid_view.viewbox_grid(viewport);
+                let bbox = self.grid_view.grid.iter().filter(|&&(x, y)| {
+                    let pos = Pos2::new(x as f32, y as f32);
+                    view_rect.contains(pos)
+                }).fold(None, |acc: Option<((i32, i32), (i32, i32))>, &(x, y)| {
+                    match acc {
+                        None => Some(((x, y), (x, y))),
+                        Some(((min_x, min_y), (max_x, max_y))) => Some((
+                            (min_x.min(x), min_y.min(y)),
+                            (max_x.max(x), max_y.max(y)),
+                        )),
+                    }
+                });
+                if let Some(((min_x, min_y), (max_x, max_y))) = bbox {
+                    let margin = 0.10; // 10% margin
+                    let width: f32 = ((max_x - min_x + 1).abs().max(1)) as f32;
+                    let height: f32 = ((max_y - min_y + 1).abs().max(1)) as f32;
+                    let center_x = (min_x + max_x) as f32 / 2.0;
+                    let center_y = (min_y + max_y) as f32 / 2.0;
+                    self.grid_view.center = Pos2::new(center_x, center_y);
+                    let fit_scale_x = viewport.x * (1.0 - margin * 2.0) / width;
+                    let fit_scale_y = viewport.y * (1.0 - margin * 2.0) / height;
+                    let fit_scale = fit_scale_x.min(fit_scale_y);
+                    self.grid_view.scale = fit_scale;
+                }
+            },
+            2 => { // Fit all live cells
+                if let Some(((min_x, min_y), (max_x, max_y))) = self.life.bounding_box().map(|((min_x, min_y), (max_x, max_y))| {
+                    ((min_x as i32, min_y as i32), (max_x as i32, max_y as i32))
+                }) {
+                    let margin = 0.10; // 10% margin
+                    let width: f32 = ((max_x - min_x + 1).abs().max(1)) as f32;
+                    let height: f32 = ((max_y - min_y + 1).abs().max(1)) as f32;
+                    let center_x = (min_x + max_x) as f32 / 2.0;
+                    let center_y = (min_y + max_y) as f32 / 2.0;
+                    self.grid_view.center = Pos2::new(center_x, center_y);
+                    let viewport = self.grid_view.last_viewport_size.unwrap_or(Vec2::new(800.0, 600.0));
+                    let fit_scale_x = viewport.x * (1.0 - margin * 2.0) / width;
+                    let fit_scale_y = viewport.y * (1.0 - margin * 2.0) / height;
+                    let fit_scale = fit_scale_x.min(fit_scale_y);
+                    self.grid_view.scale = fit_scale;
+                }
+            },
+            _ => {}, // Normal mode: do nothing
+        }
+
         // Update each frame
         ctx.request_repaint();
 
@@ -144,6 +195,12 @@ impl eframe::App for MashlifeGui {
                                 self.life = life;
                                 self.world = input;
                                 self.view_center = view_center;
+                                // Clear and repopulate the grid view to avoid stale/black grid
+                                self.grid_view.grid.clear();
+                                self.grid_view.center = Pos2::ZERO;
+                                self.grid_view.scale = 1e-1;
+                                // Optionally, center and fit the view to the new pattern
+                                // (auto_camera will do this if enabled)
                             }
                         }
                     });
@@ -172,6 +229,18 @@ impl eframe::App for MashlifeGui {
                 if ui.button("Step").clicked() {
                     self.time_step(1);
                 }
+                egui::ComboBox::from_label("View Mode")
+                    .selected_text(match self.auto_camera_mode {
+                        0 => "Normal",
+                        1 => "Fit visible live cells",
+                        2 => "Fit all live cells",
+                        _ => "Unknown",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.auto_camera_mode, 0, "Normal");
+                        ui.selectable_value(&mut self.auto_camera_mode, 1, "Fit visible live cells");
+                        ui.selectable_value(&mut self.auto_camera_mode, 2, "Fit all live cells");
+                    });
 
                 let (result_bytes, parent_bytes, macrocells_bytes) = self.life.mem_usage();
                 ui.label(format!("Results: {}", format_mem_size(result_bytes)));
@@ -228,11 +297,14 @@ pub struct GridView {
     grid: Grid,
     /// Changes to be applied to the game when ready
     queued_changes: HashSet<Coord, ZwoHasher>,
+    /// Last viewport size
+    last_viewport_size: Option<Vec2>,
 }
 
 impl GridView {
     pub fn new() -> Self {
-        Self::from_grid(Grid::default())
+        let mut gv = Self::from_grid(Grid::default());
+        gv
     }
 
     pub fn min_n(&self) -> usize {
@@ -246,6 +318,7 @@ impl GridView {
             center: Pos2::ZERO,
             grid,
             queued_changes: Default::default(),
+            last_viewport_size: None,
         }
     }
 
@@ -364,6 +437,9 @@ impl GridView {
     ) -> Response {
         let area = ui.available_size();
         let (display_rect, response) = ui.allocate_exact_size(area, egui::Sense::click_and_drag());
+
+        // Store the last viewport size for movie mode
+        self.last_viewport_size = Some(area);
 
         // Clip outside the draw space
         let mut ui = ui.child_ui(display_rect, egui::Layout::default());
