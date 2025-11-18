@@ -314,8 +314,10 @@ impl GridView {
 
     fn update_life(&mut self, life: &mut HashLife, mut node: Handle) -> Handle {
         // Apply pending changes
+        let ox = 1i64 << (MAX_N - 1);
+        let oy = 1i64 << (MAX_N - 1);
         for (x, y) in self.queued_changes.drain() {
-            let coord = (x + (1 << MAX_N - 1), y + (1 << MAX_N - 1));
+            let coord = (x.wrapping_add(ox), y.wrapping_add(oy));
             let value = !life.read(node, coord);
             node = life.modify(node, coord, value, MAX_N);
         }
