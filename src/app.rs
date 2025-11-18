@@ -236,7 +236,7 @@ impl GridView {
     }
 
     pub fn min_n(&self) -> usize {
-        (1. / self.scale).log2() as usize
+        ((1. / self.scale).log2() as usize).max(1)
     }
 
     /// Create a new instance from a grid
